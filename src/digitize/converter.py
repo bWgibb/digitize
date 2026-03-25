@@ -1,0 +1,39 @@
+"""Image to PDF conversion using ImageMagick."""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+
+def convert_image_to_pdf(
+    image_path: Path,
+    output_dir: Path,
+    filename: str | None = None,
+    density: int = 150,
+) -> Path:
+    """Convert an image to PDF using ImageMagick.
+
+    If filename is not provided, the image stem is used with .pdf extension.
+    The final filename may be renamed later after metadata extraction.
+    """
+    if filename:
+        pdf_name = filename if filename.endswith(".pdf") else f"{filename}.pdf"
+    else:
+        pdf_name = f"{image_path.stem}.pdf"
+
+    pdf_path = output_dir / pdf_name
+
+    subprocess.run(
+        ["magick", str(image_path), "-density", str(density), str(pdf_path)],
+        check=True,
+        capture_output=True,
+    )
+    return pdf_path
+
+
+def rename_pdf(pdf_path: Path, new_name: str) -> Path:
+    """Rename a PDF file. Returns the new path."""
+    new_path = pdf_path.parent / new_name
+    pdf_path.rename(new_path)
+    return new_path
