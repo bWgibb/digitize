@@ -4,82 +4,69 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project does
 
-`digitize` is a CLI tool that extracts structured data from engineering drawing images (electrical, instrumentation, mechanical, civil) using Claude's vision API. It takes a drawing image, converts to PDF, classifies it by discipline/type, runs a QA check, then extracts all visible information into a structured JSON output.
+`digitize` is a CLI that extracts structured JSON from engineering drawing images using Claude's vision. Pipeline per drawing: convert to PDF, detect type, QA check, extract content, self-review + fix, write output + index.
 
 ## Commands
 
 ```bash
-# Development setup
 make dev                                    # pip install -e ".[dev]"
+make test                                   # run offline tests
 
-# Run tests (no API key needed — uses offline fixtures)
-make test
-
-# Run tests against live API and record responses
-ANTHROPIC_API_KEY=sk-... make test-record
-
-# Run the CLI
-digitize run <image_files> --output-dir digitized/
-
-# Useful flags
-digitize run drawing.png --dry-run          # preview extraction without writing files
-digitize run drawing.png --skip-qa          # skip PDF quality check step
+digitize run drawing.png                    # process a drawing (default: --provider api)
+digitize run drawing.png --provider cli     # use Claude Code subscription
+digitize run *.png                          # batch — skips already-processed files
+digitize run drawings.pdf                   # splits multi-page PDFs, processes each page
+digitize run drawing.png --force            # reprocess even if output exists
+digitize run drawing.png --skip-verify      # skip self-review step
+digitize run drawing.png --skip-qa          # skip PDF quality check
+digitize run drawing.png --debug            # write .debug.json with raw LLM responses
+digitize run drawing.png --dry-run          # preview without writing files
 digitize run drawing.png --type dc_schematic --discipline electrical  # force classification
-digitize run drawing.png --model claude-sonnet-4-20250514
-digitize run drawing.png --provider cli     # use Claude Code subscription instead of API key
 
-# Other commands
-digitize init                               # create .digitize/config.json interactively
-digitize list                               # list digitized drawings from the index
-digitize config                             # show current project config
+digitize list                               # show drawing index
+digitize init                               # create .digitize/config.json
+digitize config                             # show current config
 ```
 
 ## Providers
 
-Two ways to authenticate with Claude:
+- `--provider api` (default) — Anthropic SDK. Requires `ANTHROPIC_API_KEY`.
+- `--provider cli` — Claude Code CLI subprocess. Sends images as base64 via `--input-format stream-json` (same quality as a direct CC session). No API key needed. Set `DIGITIZE_PROVIDER=cli` as default.
 
-- `--provider api` (default) — uses the Anthropic SDK directly. Requires `ANTHROPIC_API_KEY`. Faster and more reliable for image analysis.
-- `--provider cli` — uses the `claude` CLI as a subprocess. Requires Claude Code installed and authenticated. Uses subscription credits. Set `DIGITIZE_PROVIDER=cli` to make it the default.
-
-CLI provider note: detection runs against the PDF (not the raw image) because the CLI's Read tool handles PDFs with better text fidelity than large images.
+Default model: `claude-opus-4-6`. Override with `--model`.
 
 ## Architecture
 
-The pipeline runs per image: convert to PDF -> detect type -> QA -> extract -> write JSON -> update index.
-
-Key modules in `src/digitize/`:
-
-- `cli.py` — Typer CLI entry point (`digitize = "digitize.cli:app"`). Orchestrates the pipeline.
-- `client.py` — `ClaudeClient` with `analyze_image()` and `analyze_pdf()`. Dispatches to Anthropic SDK or Claude CLI subprocess based on provider.
-- `detector.py` — Classifies discipline + drawing type. Accepts images or PDFs.
-- `converter.py` — Image to PDF via ImageMagick (`magick` CLI).
-- `pdf_qa.py` — Sends the PDF to Claude to verify completeness and legibility.
-- `extractor.py` — Sends the image with discipline-specific prompts, returns `DigitizedDrawing`.
-- `index.py` — Maintains `DRAWING-INDEX.md` in the output directory.
-- `models.py` — Pydantic models for the JSON output schema.
-- `config.py` — Project config from `.digitize/config.json`. Includes default engineering abbreviations.
+```
+cli.py          Typer entry point. Preflight checks, input validation, batch loop with
+                graceful failure, progress counter, summary.
+client.py       ClaudeClient.analyze() — single method for images and PDFs. Dispatches
+                to Anthropic SDK (_call_api) or Claude CLI (_call_cli). Tracks tokens.
+parsing.py      parse_json_response() — shared LLM output parser. Handles markdown
+                fencing, preamble text, trailing commentary.
+detector.py     Drawing type classification via title block transcription.
+extractor.py    Structured extraction with discipline-specific prompts.
+verify.py       review_extraction() compares JSON vs source, fix_extraction() applies
+                corrections. Both use client.analyze() against the original image.
+pdf_qa.py       Checks generated PDF for completeness and legibility.
+converter.py    ImageMagick wrapper. Image-to-PDF, PDF page splitting, page counting.
+index.py        DRAWING-INDEX.md management. Deduplicates by (drawing number, sheet).
+models.py       Pydantic schema: DigitizedDrawing, DrawingType, Component, etc.
+config.py       Project config from .digitize/config.json. Default abbreviations.
+```
 
 ### Prompt system
 
-`prompts/detect.py` — Classification taxonomy. Requires title block transcription before classifying.
-`prompts/extract.py` — Assembles extraction prompts from common instructions + discipline-specific instructions.
-`prompts/disciplines/` — Per-discipline extraction instructions. Each module exports `TYPES: dict[str, str]`.
+- `prompts/detect.py` — Classification taxonomy. Requires title block transcription before classifying to prevent misclassification.
+- `prompts/extract.py` — Assembles system prompt from common instructions + discipline-specific instructions + project context.
+- `prompts/disciplines/` — Per-discipline extraction instructions. Each module exports `TYPES: dict[str, str]`.
 
-To add a new drawing type: add it to `detect.py`'s taxonomy, then add extraction instructions in `prompts/disciplines/`.
-
-## Testing
-
-```bash
-make test           # run all tests offline
-make test-record    # record new API cassettes (needs ANTHROPIC_API_KEY)
-```
-
-Tests in `tests/` cover models, config, and JSON parsing without API calls. Place sample images in `tests/fixtures/` for integration tests.
+To add a new drawing type: add to `detect.py` taxonomy, add extraction instructions in `prompts/disciplines/`.
 
 ## Dependencies
 
-- `anthropic` — Claude API (only needed for `--provider api`)
+- `anthropic` — only needed for `--provider api`
 - `typer` + `rich` — CLI and terminal output
-- `pydantic` — Data models
-- ImageMagick (`magick`) — image to PDF conversion
+- `pydantic` — data models
+- ImageMagick (`magick` command) — image/PDF conversion
 - `claude` CLI — only needed for `--provider cli`
