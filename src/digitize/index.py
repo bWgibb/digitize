@@ -96,6 +96,12 @@ def _read_rows(index_path: Path) -> list[tuple[tuple[str, str], str]]:
     return rows
 
 
+def is_processed(output_dir: Path, source_filename: str) -> bool:
+    """Check if a source file has already been processed (JSON exists)."""
+    stem = Path(source_filename).stem
+    return (output_dir / f"{stem}.json").exists()
+
+
 def _write_index(index_path: Path, rows: list[tuple[tuple[str, str], str]]) -> None:
     """Write the full index file."""
     lines = [HEADER.rstrip()]

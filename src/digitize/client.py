@@ -13,10 +13,14 @@ class ClaudeClient:
     """Thin wrapper around the Anthropic SDK or Claude CLI for vision tasks."""
 
     def __init__(
-        self, model: str = "claude-sonnet-4-20250514", provider: str = "api"
+        self, model: str = "claude-opus-4-6", provider: str = "api",
+        debug: bool = False,
     ) -> None:
         self.model = model
         self.provider = provider
+        self.debug = debug
+        self.debug_log: list[dict] = []
+        self._call_count = 0
         if provider == "api":
             import anthropic
 
@@ -30,8 +34,12 @@ class ClaudeClient:
         max_tokens: int = 8192,
     ) -> str:
         """Send an image to Claude with a prompt and return the text response."""
+        self._call_count += 1
+        step = f"call_{self._call_count}"
         if self.provider == "cli":
-            return self._run_cli(image_path, system_prompt, user_prompt)
+            result = self._run_cli(image_path, system_prompt, user_prompt)
+            self._log(step, result)
+            return result
 
         media_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
         image_data = base64.standard_b64encode(image_path.read_bytes()).decode()
@@ -57,7 +65,9 @@ class ClaudeClient:
                 }
             ],
         )
-        return message.content[0].text
+        text = message.content[0].text
+        self._log(step, text)
+        return text
 
     def analyze_pdf(
         self,
@@ -67,8 +77,12 @@ class ClaudeClient:
         max_tokens: int = 8192,
     ) -> str:
         """Send a PDF to Claude with a prompt and return the text response."""
+        self._call_count += 1
+        step = f"call_{self._call_count}"
         if self.provider == "cli":
-            return self._run_cli(pdf_path, system_prompt, user_prompt)
+            result = self._run_cli(pdf_path, system_prompt, user_prompt)
+            self._log(step, result)
+            return result
 
         pdf_data = base64.standard_b64encode(pdf_path.read_bytes()).decode()
 
@@ -93,32 +107,62 @@ class ClaudeClient:
                 }
             ],
         )
-        return message.content[0].text
+        text = message.content[0].text
+        self._log(step, text)
+        return text
+
+    def _log(self, step: str, response: str) -> None:
+        """Record a debug log entry."""
+        if self.debug:
+            self.debug_log.append({"step": step, "response": response})
 
     def _run_cli(
         self, file_path: Path, system_prompt: str, user_prompt: str
     ) -> str:
-        """Run analysis via the Claude Code CLI subprocess."""
-        abs_path = file_path.resolve()
-        prompt = (
-            f"Read the file at {abs_path}, then:\n\n{user_prompt}\n\n"
-            "IMPORTANT: Respond with ONLY the requested output. "
-            "Do not include any preamble, explanation, or commentary."
-        )
+        """Run analysis via the Claude Code CLI with direct image/PDF input."""
+        file_data = base64.standard_b64encode(file_path.read_bytes()).decode()
+
+        if file_path.suffix.lower() == ".pdf":
+            content_block = {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": file_data,
+                },
+            }
+        else:
+            media_type = mimetypes.guess_type(str(file_path))[0] or "image/png"
+            content_block = {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": file_data,
+                },
+            }
+
+        msg = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [content_block, {"type": "text", "text": user_prompt}],
+            },
+        }
+        input_data = json.dumps(msg)
 
         cmd = [
             "claude",
-            "-p", prompt,
+            "-p",
             "--system-prompt", system_prompt,
             "--model", self.model,
+            "--input-format", "stream-json",
             "--output-format", "stream-json",
             "--verbose",
-            "--allowedTools", "Read",
-            "--dangerously-skip-permissions",
         ]
 
         result = subprocess.run(
-            cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
+            cmd, capture_output=True, text=True, input=input_data,
         )
 
         if result.returncode != 0:

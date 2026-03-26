@@ -37,3 +37,36 @@ def rename_pdf(pdf_path: Path, new_name: str) -> Path:
     new_path = pdf_path.parent / new_name
     pdf_path.rename(new_path)
     return new_path
+
+
+def get_pdf_page_count(pdf_path: Path) -> int:
+    """Return the number of pages in a PDF."""
+    result = subprocess.run(
+        ["magick", "identify", str(pdf_path)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return 1
+    return len(result.stdout.strip().splitlines())
+
+
+def split_pdf_to_images(pdf_path: Path, output_dir: Path) -> list[Path]:
+    """Split a multi-page PDF into one PNG per page.
+
+    Returns list of image paths in page order.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = pdf_path.stem
+
+    subprocess.run(
+        [
+            "magick", str(pdf_path),
+            "-density", "200",
+            str(output_dir / f"{stem}-page-%03d.png"),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    pages = sorted(output_dir.glob(f"{stem}-page-*.png"))
+    return pages
