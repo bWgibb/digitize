@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from digitize.client import ClaudeClient
+from digitize.parsing import parse_json_response
 
 SYSTEM_PROMPT = """\
 You are a QA checker for engineering drawing PDFs. You will receive a PDF \
@@ -31,42 +31,18 @@ def qa_pdf(
     pdf_path: Path,
     source_image: Path,
 ) -> tuple[bool, str]:
-    """Run QA check on a generated PDF by sending it to Claude.
-
-    Returns (passed, message).
-    """
-    response = client.analyze_pdf(
+    """Run QA check on a generated PDF. Returns (passed, message)."""
+    response = client.analyze(
         pdf_path,
-        system_prompt=SYSTEM_PROMPT,
-        user_prompt=(
-            "This PDF was generated from an engineering drawing image. "
-            "Verify it is complete and legible. Return your assessment as JSON."
-        ),
+        SYSTEM_PROMPT,
+        "This PDF was generated from an engineering drawing image. "
+        "Verify it is complete and legible. Return your assessment as JSON.",
     )
 
-    result = _parse_json(response)
+    result = parse_json_response(response)
     if result is None:
         return False, f"Could not parse QA response: {response[:200]}"
     passed = result.get("passed", False)
     issues = result.get("issues", [])
     msg = "; ".join(issues) if issues else "OK"
     return passed, msg
-
-
-def _parse_json(response: str) -> dict | None:
-    """Extract a JSON object from a response that may contain surrounding text."""
-    text = response.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None

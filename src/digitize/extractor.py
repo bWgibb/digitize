@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from datetime import date
 from pathlib import Path
 
 from digitize.client import ClaudeClient
 from digitize.config import ProjectConfig
 from digitize.models import DigitizedDrawing, DrawingType
+from digitize.parsing import parse_json_response
 from digitize.prompts.extract import build_extraction_prompt
 
 
@@ -19,21 +19,16 @@ def extract_drawing(
     config: ProjectConfig | None,
     pdf_path: Path,
 ) -> DigitizedDrawing:
-    """Extract structured data from a drawing image.
-
-    Sends the image to Claude with type-specific extraction prompts
-    and parses the response into a DigitizedDrawing model.
-    """
+    """Extract structured data from a drawing image."""
     system_prompt, user_prompt = build_extraction_prompt(drawing_type, config)
 
-    response = client.analyze_image(
-        image_path,
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        max_tokens=16384,
-    )
+    response = client.analyze(image_path, system_prompt, user_prompt, max_tokens=16384)
 
-    data = _parse_response(response)
+    data = parse_json_response(response)
+    if data is None:
+        raise ValueError(
+            f"Could not parse extraction response as JSON: {response[:300]}"
+        )
 
     # Inject metadata not from the drawing itself
     drawing_data = data.get("drawing", {})
@@ -51,27 +46,3 @@ def extract_drawing(
         data["project_context"] = context
 
     return DigitizedDrawing.model_validate(data)
-
-
-def _parse_response(response: str) -> dict:
-    """Parse Claude's JSON response, handling markdown code fencing."""
-    text = response.strip()
-
-    # Strip markdown code fencing if present
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        # Try to find JSON object in the response
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            try:
-                return json.loads(text[start : end + 1])
-            except json.JSONDecodeError:
-                pass
-        raise ValueError(
-            f"Could not parse extraction response as JSON: {text[:300]}"
-        ) from exc

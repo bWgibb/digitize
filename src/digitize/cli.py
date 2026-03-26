@@ -5,9 +5,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -100,20 +99,20 @@ def _validate_inputs(
 def run(
     paths: Annotated[list[Path], typer.Argument(help="Image or PDF file(s) to digitize")],
     output_dir: Annotated[
-        Optional[Path], typer.Option("--output-dir", "-o", help="Output directory")
+        Path | None, typer.Option("--output-dir", "-o", help="Output directory")
     ] = None,
     config_path: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--config", "-c", help="Path to project config"),
     ] = None,
     skip_qa: Annotated[
         bool, typer.Option("--skip-qa", help="Skip PDF quality check")
     ] = False,
     force_type: Annotated[
-        Optional[str], typer.Option("--type", help="Force drawing type")
+        str | None, typer.Option("--type", help="Force drawing type")
     ] = None,
     force_discipline: Annotated[
-        Optional[str], typer.Option("--discipline", help="Force discipline")
+        str | None, typer.Option("--discipline", help="Force discipline")
     ] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show extraction without writing")
@@ -395,10 +394,10 @@ def init(
 @app.command(name="list")
 def list_drawings(
     output_dir: Annotated[
-        Optional[Path], typer.Option("--output-dir", "-o")
+        Path | None, typer.Option("--output-dir", "-o")
     ] = None,
     config_path: Annotated[
-        Optional[Path], typer.Option("--config", "-c")
+        Path | None, typer.Option("--config", "-c")
     ] = None,
 ) -> None:
     """List digitized drawings from the index."""
@@ -410,7 +409,7 @@ def list_drawings(
 @app.command()
 def config(
     config_path: Annotated[
-        Optional[Path], typer.Option("--config", "-c")
+        Path | None, typer.Option("--config", "-c")
     ] = None,
 ) -> None:
     """Show current project config."""

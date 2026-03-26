@@ -1,4 +1,4 @@
-"""Verify extracted JSON against the source drawing and optionally fix errors."""
+"""Review extracted JSON against the source drawing and fix errors."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from pathlib import Path
 
 from digitize.client import ClaudeClient
 from digitize.models import DigitizedDrawing
+from digitize.parsing import parse_json_response
 
 REVIEW_SYSTEM_PROMPT = """\
 You are a QA reviewer for engineering drawing digitization. You will receive \
@@ -57,35 +58,19 @@ def review_extraction(
     source_path: Path,
     result: DigitizedDrawing,
 ) -> dict:
-    """Compare extracted JSON against the source drawing.
-
-    Returns a review report dict.
-    """
+    """Compare extracted JSON against the source drawing."""
     result_json = json.dumps(result.model_dump(), indent=2, default=str)
 
-    user_prompt = (
+    response = client.analyze(
+        source_path,
+        REVIEW_SYSTEM_PROMPT,
         "Here is the JSON extraction of this drawing:\n\n"
         f"```json\n{result_json}\n```\n\n"
         "Compare this JSON against the drawing. Identify any errors, "
-        "missing items, or fabricated data. Return your assessment as JSON."
+        "missing items, or fabricated data. Return your assessment as JSON.",
     )
 
-    if source_path.suffix.lower() == ".pdf":
-        response = client.analyze_pdf(
-            source_path,
-            system_prompt=REVIEW_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            max_tokens=8192,
-        )
-    else:
-        response = client.analyze_image(
-            source_path,
-            system_prompt=REVIEW_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            max_tokens=8192,
-        )
-
-    return _parse_json(response) or {
+    return parse_json_response(response) or {
         "passed": False,
         "score": 0,
         "errors": [],
@@ -101,37 +86,22 @@ def fix_extraction(
     result: DigitizedDrawing,
     review: dict,
 ) -> DigitizedDrawing:
-    """Apply review corrections to the extraction.
-
-    Returns the corrected DigitizedDrawing.
-    """
+    """Apply review corrections to the extraction."""
     result_json = json.dumps(result.model_dump(), indent=2, default=str)
     review_json = json.dumps(review, indent=2, default=str)
 
-    user_prompt = (
+    response = client.analyze(
+        source_path,
+        FIX_SYSTEM_PROMPT,
         "Here is the current JSON extraction:\n\n"
         f"```json\n{result_json}\n```\n\n"
         "Here is the review identifying errors:\n\n"
         f"```json\n{review_json}\n```\n\n"
-        "Apply the corrections and return the fixed JSON."
+        "Apply the corrections and return the fixed JSON.",
+        max_tokens=16384,
     )
 
-    if source_path.suffix.lower() == ".pdf":
-        response = client.analyze_pdf(
-            source_path,
-            system_prompt=FIX_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            max_tokens=16384,
-        )
-    else:
-        response = client.analyze_image(
-            source_path,
-            system_prompt=FIX_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            max_tokens=16384,
-        )
-
-    fixed_data = _parse_json(response)
+    fixed_data = parse_json_response(response)
     if fixed_data is None:
         return result
 
@@ -141,22 +111,3 @@ def fix_extraction(
     fixed_data["drawing_type"] = result.drawing_type.model_dump()
 
     return DigitizedDrawing.model_validate(fixed_data)
-
-
-def _parse_json(response: str) -> dict | None:
-    """Extract a JSON object from a response that may contain surrounding text."""
-    text = response.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
