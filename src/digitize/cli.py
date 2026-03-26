@@ -171,7 +171,7 @@ def run(
             _write_debug_report(client, out, path, review)
 
         # Summary
-        _print_summary(result, pdf_path, json_path, review)
+        _print_summary(result, pdf_path, json_path, review, client)
 
 
 def _expand_inputs(
@@ -207,6 +207,7 @@ def _print_summary(
     pdf_path: Path,
     json_path: Path,
     verification: dict | None = None,
+    client: ClaudeClient | None = None,
 ) -> None:
     table = Table(title="Digitization Summary", show_header=False)
     table.add_column("Field", style="bold")
@@ -231,6 +232,12 @@ def _print_summary(
         n_fabricated = len(verification.get("fabricated", []))
         table.add_row("Verify score", str(score))
         table.add_row("Errors / Missing / Fabricated", f"{n_errors} / {n_missing} / {n_fabricated}")
+    if client:
+        total = client.total_input_tokens + client.total_output_tokens
+        table.add_row(
+            "Tokens",
+            f"{total:,} ({client.total_input_tokens:,} in / {client.total_output_tokens:,} out)",
+        )
     table.add_row("PDF", str(pdf_path))
     table.add_row("JSON", str(json_path))
     console.print(table)

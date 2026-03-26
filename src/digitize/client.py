@@ -21,6 +21,8 @@ class ClaudeClient:
         self.debug = debug
         self.debug_log: list[dict] = []
         self._call_count = 0
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
         if provider == "api":
             import anthropic
 
@@ -66,6 +68,7 @@ class ClaudeClient:
             ],
         )
         text = message.content[0].text
+        self._track_usage(message.usage)
         self._log(step, text)
         return text
 
@@ -108,8 +111,24 @@ class ClaudeClient:
             ],
         )
         text = message.content[0].text
+        self._track_usage(message.usage)
         self._log(step, text)
         return text
+
+    def _track_usage(self, usage: object) -> None:
+        """Accumulate token counts from an API response or CLI output."""
+        if hasattr(usage, "input_tokens"):
+            # API SDK response object
+            self.total_input_tokens += usage.input_tokens
+            self.total_output_tokens += usage.output_tokens
+        elif isinstance(usage, dict):
+            # CLI stream-json: input_tokens is just non-cached;
+            # add cache fields for the real total
+            inp = usage.get("input_tokens", 0)
+            inp += usage.get("cache_creation_input_tokens", 0)
+            inp += usage.get("cache_read_input_tokens", 0)
+            self.total_input_tokens += inp
+            self.total_output_tokens += usage.get("output_tokens", 0)
 
     def _log(self, step: str, response: str) -> None:
         """Record a debug log entry."""
@@ -170,12 +189,15 @@ class ClaudeClient:
                 f"Claude CLI failed (exit {result.returncode}): {result.stderr.strip()}"
             )
 
-        return self._parse_stream_json(result.stdout)
+        text, usage = self._parse_stream_json(result.stdout)
+        self._track_usage(usage)
+        return text
 
     @staticmethod
-    def _parse_stream_json(output: str) -> str:
-        """Extract assistant text content from stream-json output."""
+    def _parse_stream_json(output: str) -> tuple[str, dict]:
+        """Extract assistant text and usage from stream-json output."""
         text_parts = []
+        usage: dict = {}
         for line in output.splitlines():
             line = line.strip()
             if not line:
@@ -186,6 +208,8 @@ class ClaudeClient:
                     for block in msg.get("message", {}).get("content", []):
                         if block.get("type") == "text":
                             text_parts.append(block["text"])
+                elif msg.get("type") == "result":
+                    usage = msg.get("usage", {})
             except json.JSONDecodeError:
                 continue
-        return "".join(text_parts)
+        return "".join(text_parts), usage
