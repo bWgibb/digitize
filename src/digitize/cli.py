@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -28,10 +30,75 @@ app = typer.Typer(
 )
 console = Console()
 
+VALID_DISCIPLINES = {"electrical", "instrumentation", "mechanical", "civil"}
+VALID_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp", ".pdf"}
+
+
+def _preflight_checks(provider: str) -> None:
+    """Verify external dependencies before starting a run."""
+    # ImageMagick
+    if not shutil.which("magick"):
+        console.print("[red]ImageMagick not found.[/red] Install it: https://imagemagick.org/")
+        raise typer.Exit(1)
+
+    # Provider-specific checks
+    if provider == "api":
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            console.print(
+                "[red]ANTHROPIC_API_KEY not set.[/red]\n"
+                "Set it or use --provider cli for Claude Code subscription."
+            )
+            raise typer.Exit(1)
+    elif provider == "cli":
+        if not shutil.which("claude"):
+            console.print(
+                "[red]Claude Code CLI not found.[/red]\n"
+                "Install it: https://docs.anthropic.com/en/docs/claude-code"
+            )
+            raise typer.Exit(1)
+    else:
+        console.print(f"[red]Unknown provider: {provider}[/red] (use 'api' or 'cli')")
+        raise typer.Exit(1)
+
+
+def _validate_inputs(
+    paths: list[Path],
+    force_discipline: str | None,
+    force_type: str | None,
+) -> list[Path]:
+    """Validate input files and options. Returns list of valid paths."""
+    # Validate discipline/type options
+    if force_discipline and force_discipline not in VALID_DISCIPLINES:
+        console.print(
+            f"[red]Unknown discipline: {force_discipline}[/red]\n"
+            f"Valid: {', '.join(sorted(VALID_DISCIPLINES))}"
+        )
+        raise typer.Exit(1)
+
+    # Validate input files
+    valid = []
+    for path in paths:
+        if not path.exists():
+            console.print(f"[red]File not found: {path}[/red]")
+            continue
+        if path.suffix.lower() not in VALID_IMAGE_SUFFIXES:
+            console.print(
+                f"[yellow]Skipping unsupported file type: {path.name}[/yellow] "
+                f"(supported: {', '.join(sorted(VALID_IMAGE_SUFFIXES))})"
+            )
+            continue
+        valid.append(path)
+
+    if not valid:
+        console.print("[red]No valid input files.[/red]")
+        raise typer.Exit(1)
+
+    return valid
+
 
 @app.command()
 def run(
-    paths: Annotated[list[Path], typer.Argument(help="Image file(s) to digitize")],
+    paths: Annotated[list[Path], typer.Argument(help="Image or PDF file(s) to digitize")],
     output_dir: Annotated[
         Optional[Path], typer.Option("--output-dir", "-o", help="Output directory")
     ] = None,
@@ -64,10 +131,14 @@ def run(
         str, typer.Option("--model", help="Claude model to use")
     ] = "claude-opus-4-6",
     provider: Annotated[
-        str, typer.Option("--provider", help="Provider: 'api' (Anthropic SDK) or 'cli' (Claude Code subscription)")
+        str, typer.Option("--provider", help="Provider: 'api' or 'cli'")
     ] = os.environ.get("DIGITIZE_PROVIDER", "api"),
 ) -> None:
     """Digitize one or more engineering drawing images."""
+    # Preflight
+    _preflight_checks(provider)
+    valid_paths = _validate_inputs(paths, force_discipline, force_type)
+
     cfg = load_config(config_path)
     out = output_dir or Path(cfg.output_dir if cfg else "digitized")
     out.mkdir(parents=True, exist_ok=True)
@@ -75,103 +146,134 @@ def run(
     client = ClaudeClient(model=model, provider=provider, debug=debug)
 
     # Expand multi-page PDFs into individual page images
-    source_images = _expand_inputs(paths, out, console)
+    source_images = _expand_inputs(valid_paths, out, console)
+    total = len(source_images)
 
-    for path in source_images:
-        if not path.exists():
-            console.print(f"[red]File not found: {path}[/red]")
-            continue
+    succeeded: list[str] = []
+    skipped: list[str] = []
+    failed: list[tuple[str, str]] = []
 
+    for i, path in enumerate(source_images, 1):
         # Skip if already processed
         if not force and not dry_run and is_processed(out, path.name):
-            console.print(f"\n[dim]Skipping (already processed): {path.name}[/dim]")
+            console.print(f"\n[dim]({i}/{total}) Skipping (already processed): {path.name}[/dim]")
+            skipped.append(path.name)
             continue
 
-        console.print(f"\n[bold]Processing:[/bold] {path.name}")
+        console.print(f"\n[bold]({i}/{total}) Processing:[/bold] {path.name}")
         client.debug_log.clear()
+        client.total_input_tokens = 0
+        client.total_output_tokens = 0
 
-        # Step 1: Convert to PDF
-        console.print("  [dim]Step 1: Converting to PDF...[/dim]")
-        pdf_path = convert_image_to_pdf(path, out)
-        console.print(f"  PDF: {pdf_path.name}")
-
-        # Step 2: Detect discipline and type
-        console.print("  [dim]Step 2: Detecting drawing type...[/dim]")
-        detect_path = path
-        detection = detect_drawing_type(
-            client,
-            detect_path,
-            force_discipline=force_discipline,
-            force_type=force_type,
-        )
-        console.print(
-            f"  Detected: [cyan]{detection.discipline}/{detection.primary}[/cyan]"
-            f" ({detection.confidence})"
-        )
-
-        # Step 3: QA the PDF
-        if not skip_qa:
-            console.print("  [dim]Step 3: QA check...[/dim]")
-            qa_ok, qa_msg = qa_pdf(client, pdf_path, path)
-            if qa_ok:
-                console.print("  QA: [green]passed[/green]")
-            else:
-                console.print(f"  QA: [yellow]{qa_msg}[/yellow]")
-
-        # Step 4: Extract content
-        console.print("  [dim]Step 4: Extracting content...[/dim]")
-        result: DigitizedDrawing = extract_drawing(
-            client, path, detection, cfg, pdf_path
-        )
-
-        # Step 5: Review and fix extraction
-        review = None
-        if not skip_verify:
-            console.print("  [dim]Step 5: Reviewing extraction...[/dim]")
-            review = review_extraction(client, path, result)
-            score = review.get("score", "?")
-            passed = review.get("passed", False)
-            n_errors = len(review.get("errors", []))
-            n_missing = len(review.get("missing", []))
-            n_fabricated = len(review.get("fabricated", []))
-
-            if passed:
-                console.print(f"  Review: [green]passed[/green] (score: {score})")
-            else:
-                console.print(
-                    f"  Review: [yellow]{n_errors} errors, "
-                    f"{n_missing} missing, "
-                    f"{n_fabricated} fabricated[/yellow] (score: {score})"
-                )
-                console.print("  [dim]Step 5b: Fixing extraction...[/dim]")
-                result = fix_extraction(client, path, result, review)
-                console.print("  [green]Fixed[/green]")
+        try:
+            result, pdf_path, review = _process_one(
+                client, path, out, cfg,
+                force_discipline=force_discipline,
+                force_type=force_type,
+                skip_qa=skip_qa,
+                skip_verify=skip_verify,
+            )
+        except Exception as exc:
+            console.print(f"  [red]Failed: {exc}[/red]")
+            failed.append((path.name, str(exc)))
+            if debug:
+                _write_debug_report(client, out, path, None)
+            continue
 
         if dry_run:
-            console.print(
-                json.dumps(result.model_dump(), indent=2, default=str)
-            )
+            console.print(json.dumps(result.model_dump(), indent=2, default=str))
             if debug:
                 _write_debug_report(client, out, path, review)
+            succeeded.append(path.name)
             continue
 
-        # Step 6: Write JSON
+        # Write JSON
         json_path = pdf_path.with_suffix(".json")
-        console.print(f"  [dim]Step 6: Writing JSON...[/dim]")
-        json_path.write_text(
-            json.dumps(result.model_dump(), indent=2, default=str)
-        )
+        console.print("  [dim]Writing JSON...[/dim]")
+        json_path.write_text(json.dumps(result.model_dump(), indent=2, default=str))
 
-        # Step 7: Update index
-        console.print("  [dim]Step 7: Updating index...[/dim]")
+        # Update index
+        console.print("  [dim]Updating index...[/dim]")
         update_index(out, result, pdf_path, json_path)
 
-        # Debug report
         if debug:
             _write_debug_report(client, out, path, review)
 
-        # Summary
         _print_summary(result, pdf_path, json_path, review, client)
+        succeeded.append(path.name)
+
+    # Batch summary
+    if total > 1:
+        console.print(f"\n[bold]Batch complete:[/bold] {len(succeeded)} succeeded, {len(skipped)} skipped, {len(failed)} failed")
+        for name, err in failed:
+            console.print(f"  [red]FAILED[/red] {name}: {err}")
+
+
+def _process_one(
+    client: ClaudeClient,
+    path: Path,
+    out: Path,
+    cfg: ProjectConfig | None,
+    force_discipline: str | None = None,
+    force_type: str | None = None,
+    skip_qa: bool = False,
+    skip_verify: bool = False,
+) -> tuple[DigitizedDrawing, Path, dict | None]:
+    """Run the full pipeline on a single drawing. Returns (result, pdf_path, review)."""
+    # Convert to PDF
+    console.print("  [dim]Converting to PDF...[/dim]")
+    pdf_path = convert_image_to_pdf(path, out)
+    console.print(f"  PDF: {pdf_path.name}")
+
+    # Detect
+    console.print("  [dim]Detecting drawing type...[/dim]")
+    detection = detect_drawing_type(
+        client, path,
+        force_discipline=force_discipline,
+        force_type=force_type,
+    )
+    console.print(
+        f"  Detected: [cyan]{detection.discipline}/{detection.primary}[/cyan]"
+        f" ({detection.confidence})"
+    )
+
+    # QA
+    if not skip_qa:
+        console.print("  [dim]QA check...[/dim]")
+        qa_ok, qa_msg = qa_pdf(client, pdf_path, path)
+        if qa_ok:
+            console.print("  QA: [green]passed[/green]")
+        else:
+            console.print(f"  QA: [yellow]{qa_msg}[/yellow]")
+
+    # Extract
+    console.print("  [dim]Extracting content...[/dim]")
+    result = extract_drawing(client, path, detection, cfg, pdf_path)
+
+    # Review and fix
+    review = None
+    if not skip_verify:
+        console.print("  [dim]Reviewing extraction...[/dim]")
+        review = review_extraction(client, path, result)
+        score = review.get("score", "?")
+        passed = review.get("passed", False)
+        n_errors = len(review.get("errors", []))
+        n_missing = len(review.get("missing", []))
+        n_fabricated = len(review.get("fabricated", []))
+
+        if passed:
+            console.print(f"  Review: [green]passed[/green] (score: {score})")
+        else:
+            console.print(
+                f"  Review: [yellow]{n_errors} errors, "
+                f"{n_missing} missing, "
+                f"{n_fabricated} fabricated[/yellow] (score: {score})"
+            )
+            console.print("  [dim]Fixing extraction...[/dim]")
+            result = fix_extraction(client, path, result, review)
+            console.print("  [green]Fixed[/green]")
+
+    return result, pdf_path, review
 
 
 def _expand_inputs(
@@ -180,23 +282,11 @@ def _expand_inputs(
     """Expand input paths, splitting multi-page PDFs into per-page images."""
     images: list[Path] = []
     for path in paths:
-        if not path.exists():
-            images.append(path)  # let the main loop report the error
-            continue
-
         if path.suffix.lower() == ".pdf":
             page_count = get_pdf_page_count(path)
-            if page_count == 1:
-                # Single-page PDF — split to one image
-                console.print(f"  [dim]Splitting PDF: {path.name} (1 page)[/dim]")
-                pages = split_pdf_to_images(path, output_dir / "_pages")
-                images.extend(pages)
-            else:
-                console.print(
-                    f"  [dim]Splitting PDF: {path.name} ({page_count} pages)[/dim]"
-                )
-                pages = split_pdf_to_images(path, output_dir / "_pages")
-                images.extend(pages)
+            console.print(f"  [dim]Splitting PDF: {path.name} ({page_count} page{'s' if page_count != 1 else ''})[/dim]")
+            pages = split_pdf_to_images(path, output_dir / "_pages")
+            images.extend(pages)
         else:
             images.append(path)
     return images
